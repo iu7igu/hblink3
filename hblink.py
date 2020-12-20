@@ -27,6 +27,9 @@ works stand-alone before troubleshooting any applications that use it. It has
 sufficient logging to be used standalone as a troubleshooting application.
 '''
 
+# Added config option for APRS in the master config section. Will only send packets to APRS-IS if each master is enabled.
+# Modified by KF7EEL - 10-15-2020
+
 # Specifig functions from modules we need
 from binascii import b2a_hex as ahex
 from binascii import a2b_hex as bhex
@@ -35,6 +38,9 @@ from hashlib import sha256, sha1
 from hmac import new as hmac_new, compare_digest
 from time import time
 from collections import deque
+import aprslib
+import os
+
 
 # Twisted is pretty important, so I keep it separate
 from twisted.internet.protocol import DatagramProtocol, Factory, Protocol
@@ -66,6 +72,89 @@ __email__      = 'n0mjs@me.com'
 # Global variables used whether we are a module or __main__
 systems = {}
 
+open("nom_aprs","w").close
+
+file_config=config.build_config('hblink.cfg')
+
+def sendAprs():
+    AIS = aprslib.IS(str(file_config['APRS']['CALLSIGN']), passwd=aprslib.passcode(str(file_config['APRS']['CALLSIGN'])), host=str(file_config['APRS']['SERVER']), port=14580)
+    AIS.connect()
+    f = open('nom_aprs', 'r')
+    lines = f.readlines()
+    if lines:
+        for line in lines:
+            if line != ' ':
+                lat_verso = ''
+                lon_verso = ''
+                dati = line.split(":")
+                d1_c = int(float(dati[4]))
+                d2_c = int(float(dati[5]))
+                                
+                if d1_c < 0:
+                    d1 = abs(d1_c)
+                    dm1=abs(float(dati[4])) - d1
+                    dm1_s= float(dm1) * 60
+                    dm1_u="{:.4f}".format(dm1_s)
+                    if d1 < 10 and d1 > -10:
+                        lat_utile='0'+str(d1)+str(dm1_u)
+                    else:
+                        lat_utile = str(d1)+str(dm1_u)
+                    lat_verso = 'S'
+                else:
+                    d1 = int(float(dati[4]))
+                    dm1=float(dati[4]) - d1
+                    dm1_s= float(dm1) * 60
+                    dm1_u="{:.4f}".format(dm1_s)
+                    if d1 < 10 and d1 > -10:
+                        lat_utile='0'+str(d1)+str(dm1_u)
+                    else:
+                        lat_utile = str(d1)+str(dm1_u)
+                    lat_verso = 'N'
+                                    
+                                
+                if d2_c < 0:
+                    d2=abs(d2_c)
+                    dm2=abs(float(dati[5])) - d2
+                    dm2_s= float(dm2) * 60
+                    dm2_u="{:.3f}".format(dm2_s)
+                    if d2 < 10 and d2 > -10:
+                        lon_utile = '00'+str(d2)+str(dm2_u)
+                    elif d2 < 100:
+                        lon_utile = '0'+str(d2)+str(dm2_u)
+                    else:
+                        lon_utile = str(d2)+str(dm2_s)
+                    lon_verso = 'W'
+                                    
+                else:
+                    d2=int(float(dati[5]))
+                    dm2=float(dati[5]) - d2
+                    dm2_s= float(dm2) * 60
+                    dm2_u="{:.3f}".format(dm2_s)
+                    if d2 < 10 and d2 > -10:
+                        lon_utile = '00'+str(d2)+str(dm2_u)
+                    elif d2 < 100:
+                        lon_utile = '0'+str(d2)+str(dm2_u)
+                    else:
+                        lon_utile = str(d2)+str(dm2_u)
+                    lon_verso = 'E'
+                                    
+                rx_utile = dati[2][0:3]+'.'+dati[2][3:]
+                tx_utile = dati[3][0:3]+'.'+dati[3][3:]
+                                    
+                                    
+                AIS.sendall(str(dati[0])+">APRS,TCPIP*,qAC,"+str(file_config['APRS']['CALLSIGN'])+":!"+str(lat_utile)[:-2]+lat_verso+"/"+str(lon_utile)[:-1]+lon_verso+"r"+str(file_config['APRS']['MESSAGE'])+' RX: '+str(rx_utile)+' TX: '+str(tx_utile))
+                logging.info('APRS INVIATO')
+                                                  
+if  file_config['APRS']['ENABLED']:                                                
+	if int(file_config['APRS']['REPORT_INTERVAL']) >= 10:
+		l=task.LoopingCall(sendAprs)
+		l.start(int(file_config['APRS']['REPORT_INTERVAL'])*60)
+	else:
+		l=task.LoopingCall(sendAprs)
+		l.start(15*60)
+		logger.info('Report Time APRS to short')
+
+
 # Timed loop used for reporting HBP status
 def config_reports(_config, _factory):
     def reporting_loop(_logger, _server):
@@ -80,8 +169,8 @@ def config_reports(_config, _factory):
 
     reporting = task.LoopingCall(reporting_loop, logger, report_server)
     reporting.start(_config['REPORTS']['REPORT_INTERVAL'])
-
     return report_server
+
 
 
 # Shut ourselves down gracefully by disconnecting from the masters and peers.
@@ -104,6 +193,7 @@ def acl_check(_id, _acl):
 #    OPENBRIDGE CLASS
 #************************************************
 
+
 class OPENBRIDGE(DatagramProtocol):
     def __init__(self, _name, _config, _report):
         # Define a few shortcuts to make the rest of the class more readable
@@ -112,7 +202,9 @@ class OPENBRIDGE(DatagramProtocol):
         self._report = _report
         self._config = self._CONFIG['SYSTEMS'][self._system]
         self._laststrid = deque([], 20)
-
+    
+    
+    
     def dereg(self):
         logger.info('(%s) is mode OPENBRIDGE. No De-Registration required, continuing shutdown', self._system)
 
@@ -474,8 +566,19 @@ class HBSYSTEM(DatagramProtocol):
                             and self._peers[_peer_id]['SOCKADDR'] == _sockaddr:
                     logger.info('(%s) Peer is closing down: %s (%s)', self._system, self._peers[_peer_id]['CALLSIGN'], int_id(_peer_id))
                     self.transport.write(b''.join([MSTNAK, _peer_id]), _sockaddr)
+                    if self._CONFIG['APRS']['ENABLED']:
+                    #if self._config['APRS_ENABLED'] == True:
+                        fn = 'nom_aprs'
+                        f = open(fn)
+                        output = []
+                        for line in f:
+                            if not str(int_id(_peer_id)) in line:
+                                output.append(line)
+                        f.close()
+                        f = open(fn, 'w')
+                        f.writelines(output)
+                        f.close()
                     del self._peers[_peer_id]
-
             else:
                 _peer_id = _data[4:8]      # Configure Command
                 if _peer_id in self._peers \
@@ -502,6 +605,48 @@ class HBSYSTEM(DatagramProtocol):
 
                     self.send_peer(_peer_id, b''.join([RPTACK, _peer_id]))
                     logger.info('(%s) Peer %s (%s) has sent repeater configuration', self._system, _this_peer['CALLSIGN'], _this_peer['RADIO_ID'])
+            #APRS IMPLEMENTATION
+                    conta = 0
+                    lista_blocco=['ysf', 'xlx', 'nxdn', 'dstar', 'echolink','p25', 'svx', 'l1nk']
+                    #if self._CONFIG['SYSTEMS']['APRS_ENABLED']['ENABLED']  and self._CONFIG['APRS']['ENABLED'] and not str(_this_peer['CALLSIGN'].decode('UTF-8')).replace(' ', '').isalpha() :
+                    # Check if master has APRS enabled instead of global. 
+                    if self._CONFIG['APRS']['ENABLED'] and not str(_this_peer['CALLSIGN'].decode('UTF-8')).replace(' ', '').isalpha() :
+                        file = open("nom_aprs","r")
+                        linee = file.readlines()
+                        file.close()
+                        for link in lista_blocco:
+                            if int(str(_this_peer['CALLSIGN'].decode('UTF-8')).replace(' ', '').find(link.upper())) == 0:
+                                    conta = conta + 1
+                        if len(linee) > 0:
+                            logging.info('Leggo')
+                            for linea in linee:
+                                dati_l = linea.split(':')
+                                if str(_this_peer['RADIO_ID']) == str(dati_l[1]):
+                                    conta = conta + 1
+                                    
+                            if conta == 0:
+                                file=open("nom_aprs",'a')
+                                if len(str(_this_peer['RADIO_ID'])) > 7:
+                                    id_pr=int(str(_this_peer['RADIO_ID'])[-2:])
+                                    callsign_u=str(_this_peer['CALLSIGN'].decode('UTF-8'))+"-"+str(id_pr)
+                                    file.write(callsign_u.replace(' ', '')+ ":"+ str(_this_peer['RADIO_ID']) +":"+ str(_this_peer['RX_FREQ'].decode('UTF-8')) + ":" + str(_this_peer['TX_FREQ'].decode('UTF-8'))+ ":" + str(_this_peer['LATITUDE'].decode('UTF-8')) + ":" + str(_this_peer['LONGITUDE'].decode('UTF-8')) + "\n")
+                                    file.close()
+                                else:
+                                    file.write(str(_this_peer['CALLSIGN'].decode('UTF-8')).replace(' ', '')+ ":"+ str(_this_peer['RADIO_ID']) +":"+ str(_this_peer['RX_FREQ'].decode('UTF-8')) + ":" + str(_this_peer['TX_FREQ'].decode('UTF-8'))+ ":" + str(_this_peer['LATITUDE'].decode('UTF-8')) + ":" + str(_this_peer['LONGITUDE'].decode('UTF-8')) + "\n")
+                                    file.close()
+                        else:
+                            if conta == 0:
+                                file=open("nom_aprs",'a')
+                                if len(str(_this_peer['RADIO_ID'])) > 7:
+                                    id_pr=int(str(_this_peer['RADIO_ID'])[-2:])
+                                    callsign_u=str(_this_peer['CALLSIGN'].decode('UTF-8'))+"-"+str(id_pr)
+                                    file.write(callsign_u.replace(' ', '')+ ":"+ str(_this_peer['RADIO_ID']) +":"+ str(_this_peer['RX_FREQ'].decode('UTF-8')) + ":" + str(_this_peer['TX_FREQ'].decode('UTF-8'))+ ":" + str(_this_peer['LATITUDE'].decode('UTF-8')) + ":" + str(_this_peer['LONGITUDE'].decode('UTF-8')) + "\n")
+                                    file.close()
+                                else:
+                                    file.write(str(_this_peer['CALLSIGN'].decode('UTF-8')).replace(' ', '')+ ":"+ str(_this_peer['RADIO_ID']) +":"+ str(_this_peer['RX_FREQ'].decode('UTF-8')) + ":" + str(_this_peer['TX_FREQ'].decode('UTF-8'))+ ":" + str(_this_peer['LATITUDE'].decode('UTF-8')) + ":" + str(_this_peer['LONGITUDE'].decode('UTF-8')) + "\n")
+                                    file.close()
+                        
+                    
                 else:
                     self.transport.write(b''.join([MSTNAK, _peer_id]), _sockaddr)
                     logger.warning('(%s) Peer info from Radio ID that has not logged in: %s', self._system, int_id(_peer_id))
@@ -518,18 +663,6 @@ class HBSYSTEM(DatagramProtocol):
                 else:
                     self.transport.write(b''.join([MSTNAK, _peer_id]), _sockaddr)
                     logger.warning('(%s) Ping from Radio ID that is not logged in: %s', self._system, int_id(_peer_id))
-
-        elif _command == RPTO:
-            _peer_id = _data[4:8]
-            if _peer_id in self._peers \
-                        and self._peers[_peer_id]['CONNECTION'] == 'YES' \
-                        and self._peers[_peer_id]['SOCKADDR'] == _sockaddr:
-                logger.info('(%s) Peer %s (%s) has send options: %s', self._system, self._peers[_peer_id]['CALLSIGN'], int_id(_peer_id), _data[8:])
-                self.transport.write(b''.join([RPTACK, _peer_id]), _sockaddr)
-
-        elif _command == DMRA:
-            _peer_id = _data[4:8]
-            logger.info('(%s) Recieved DMR Talker Alias from peer %s, subscriber %s', self._system, self._peers[_peer_id]['CALLSIGN'], int_id(_rf_src))
 
         else:
             logger.error('(%s) Unrecognized command. Raw HBP PDU: %s', self._system, ahex(_data))
@@ -660,7 +793,6 @@ class HBSYSTEM(DatagramProtocol):
                             self._stats['CONNECTION'] = 'YES'
                             self._stats['CONNECTED'] = time()
                             logger.info('(%s) Connection to Master Completed', self._system)
-
                             # If we are an XLX, send the XLX module request here.
                             if self._config['MODE'] == 'XLXPEER':
                                 self.send_xlxmaster(self._config['RADIO_ID'], int(4000), self._config['MASTER_SOCKADDR'])
@@ -781,6 +913,8 @@ if __name__ == '__main__':
     import sys
     import os
     import signal
+    import aprslib
+    import threading
 
     # Change the current directory to the location of the application
     os.chdir(os.path.dirname(os.path.realpath(sys.argv[0])))
@@ -802,12 +936,12 @@ if __name__ == '__main__':
     if cli_args.LOG_LEVEL:
         CONFIG['LOGGER']['LOG_LEVEL'] = cli_args.LOG_LEVEL
     logger = log.config_logging(CONFIG['LOGGER'])
-    logger.info('\n\nCopyright (c) 2013, 2014, 2015, 2016, 2018, 2019, 2020\n\tThe Regents of the K0USY Group. All rights reserved.\n')
+    logger.info('APRS IMPLEMENTATION BY IU7IGU email: iu7igu@yahoo.com \n APRS per master config by KF7EEL - KF7EEL@qsl.net \n\nCopyright (c) 2013, 2014, 2015, 2016, 2018, 2019, 2020\n\tThe Regents of the K0USY Group. All rights reserved.')
     logger.debug('(GLOBAL) Logging system started, anything from here on gets logged')
 
     # Set up the signal handler
     def sig_handler(_signal, _frame):
-        logger.info('(GLOBAL) SHUTDOWN: HBLINK IS TERMINATING WITH SIGNAL %s', str(_signal))
+        logger.info('(GLOBAL) SHUTDOWN: HBLINK IS TERMINATING WITH SIGNAL %s', str(_signal))           
         hblink_handler(_signal, _frame)
         logger.info('(GLOBAL) SHUTDOWN: ALL SYSTEM HANDLERS EXECUTED - STOPPING REACTOR')
         reactor.stop()
@@ -833,7 +967,10 @@ if __name__ == '__main__':
                 systems[system] = OPENBRIDGE(system, CONFIG, report_server)
             else:
                 systems[system] = HBSYSTEM(system, CONFIG, report_server)
+                logger.info(CONFIG['SYSTEMS'][system]['APRS_ENABLED'])
             reactor.listenUDP(CONFIG['SYSTEMS'][system]['PORT'], systems[system], interface=CONFIG['SYSTEMS'][system]['IP'])
             logger.debug('(GLOBAL) %s instance created: %s, %s', CONFIG['SYSTEMS'][system]['MODE'], system, systems[system])
 
     reactor.run()
+
+
